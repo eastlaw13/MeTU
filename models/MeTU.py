@@ -4,15 +4,12 @@ import timm
 import wandb
 import torch
 import warnings
-import shutil
 import numpy as np
 import lightning as L
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from pathlib import Path
 from torchinfo import summary
-from typing import Tuple, Dict
 from transformers import logging
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
@@ -776,6 +773,6 @@ if __name__ == "__main__":
     from torchinfo import summary
 
     model = lt_MeTU(
-        model_size="xxs", encoder_pretrained=True, learning_rate=1e-3, classes=19
+        model_size="s", encoder_pretrained=True, learning_rate=1e-3, classes=21
     )
-    summary(model, (1, 3, 512, 1024))
+    summary(model, (1, 3, 512, 512))

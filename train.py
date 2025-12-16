@@ -19,8 +19,8 @@ from datasets.VOC2012 import (
 from torch.utils.data import DataLoader
 
 
-MODEL_NAME = "MeTU-xxs"
-DATE = "1214"
+MODEL_NAME = "MobileViT-xs"
+DATE = "1215"
 DATASET_NAME = "VOC2012"
 BEST_MODEL_PATH = f"./logs/{DATASET_NAME}/{DATE}/{MODEL_NAME}/best"
 
@@ -89,13 +89,13 @@ if __name__ == "__main__":
 
     if "MeTU" in MODEL_NAME:
         model = lt_MeTU(
-            learning_rate=5e-4, model_size="xxs", encoder_pretrained=True, classes=21
+            learning_rate=5e-4, model_size="xs", encoder_pretrained=True, classes=21
         )
     elif "Segformer" in MODEL_NAME:
-        model = lt_segformerb0(learning_rate=5e-4, num_classes=21)
+        model = lt_segformerb0(learning_rate=5e-4, classes=21)
     elif "MobileViT" in MODEL_NAME:
         model = lt_mobilevit_dlv3_p(
-            model_size="xxs", encoder_pretrained=True, learning_rate=5e-4, classes=21
+            model_size="xs", encoder_pretrained=True, learning_rate=5e-4, classes=21
         )
 
     train_tf = Traintransforms()
