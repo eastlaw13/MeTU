@@ -3,6 +3,9 @@ import torch.nn.functional as F
 import numpy as np
 import time
 import logging
+import json
+import os
+from datetime import datetime
 from PIL import Image
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -20,6 +23,13 @@ logging.getLogger("fvcore.nn.jit_analysis").setLevel(logging.ERROR)
 # ==========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# 결과 저장을 위한 디렉토리 및 파일명 설정
+RESULTS_DIR = Path("./evaluation_results")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+TXT_PATH = RESULTS_DIR / f"eval_report_{TIMESTAMP}.txt"
+JSON_PATH = RESULTS_DIR / f"eval_data_{TIMESTAMP}.json"
+
 
 def format_numbers(n, decimals=3):
     if n >= 1e9:
@@ -33,7 +43,7 @@ def format_numbers(n, decimals=3):
 def measure_latency(model, dummy_input, iterations=100):
     model.eval()
     with torch.no_grad():
-        for _ in range(30):
+        for _ in range(30):  # Warmup
             _ = model(dummy_input)
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
@@ -48,6 +58,22 @@ def measure_latency(model, dummy_input, iterations=100):
             torch.cuda.synchronize()
             timings.append(starter.elapsed_time(ender))
     return np.mean(timings), 1000 / np.mean(timings)
+
+
+def save_results(results_dict, txt_log_list):
+    """
+    결과를 JSON과 TXT 파일로 저장하는 함수.
+    매 모델 평가가 끝날 때마다 호출하여 데이터 손실 방지.
+    """
+    # 1. JSON 저장
+    with open(JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(results_dict, f, indent=4, ensure_ascii=False)
+
+    # 2. TXT 저장 (덮어쓰기 모드)
+    with open(TXT_PATH, "w", encoding="utf-8") as f:
+        f.write("\n".join(txt_log_list))
+
+    print(f"✅ Results saved to {JSON_PATH} and {TXT_PATH}")
 
 
 # ==========================================
@@ -89,7 +115,7 @@ EVAL_CONFIGS = {
         ],
     },
     "Cityscapes": {
-        "images_dir": Path("../../data/CityScapes/images/val"),  # 경로 확인 필요
+        "images_dir": Path("../../data/CityScapes/images/val"),
         "masks_dir": Path("../../data/CityScapes/masks/val"),
         "total_class": 19,
         "dummy_res": (1, 3, 512, 1024),
@@ -125,12 +151,21 @@ EVAL_CONFIGS = {
 }
 
 # ==========================================
-# 3. 메인 평가 루프 (Dataset -> Model 순회)
+# 3. 메인 평가 루프
 # ==========================================
+
+# 전체 결과를 저장할 딕셔너리와 로그 리스트
+full_results = {}
+log_buffer = [f"Evaluation Report - Started at {TIMESTAMP}", "=" * 50]
+
 for ds_name, ds_info in EVAL_CONFIGS.items():
     print(f"\n{'='*20} DATASET: {ds_name} {'='*20}")
+    log_buffer.append(f"\n{'='*20} DATASET: {ds_name} {'='*20}")
 
-    # 해당 데이터셋의 transforms 임포트
+    # 데이터셋 결과를 담을 딕셔너리 초기화
+    full_results[ds_name] = {}
+
+    # Transform 설정
     if ds_name == "VOC":
         from datasets.VOC2012 import Valtransforms
 
@@ -138,7 +173,6 @@ for ds_name, ds_info in EVAL_CONFIGS.items():
     else:
         from datasets.CityScapes import ValTransforms
 
-        # Cityscapes는 보통 crop_size를 명시하거나 하단 dummy_res를 따름
         transforms = ValTransforms(crop_size=(512, 1024))
 
     image_paths = sorted(ds_info["images_dir"].rglob(ds_info["img_ext"]))
@@ -151,7 +185,9 @@ for ds_name, ds_info in EVAL_CONFIGS.items():
         try:
             model = cfg["class"].load_from_checkpoint(cfg["ckpt"]).to(device)
         except Exception as e:
-            print(f"Failed to load {cfg['name']}: {e}")
+            err_msg = f"Failed to load {cfg['name']}: {e}"
+            print(err_msg)
+            log_buffer.append(err_msg)
             continue
 
         model.eval()
@@ -188,8 +224,9 @@ for ds_name, ds_info in EVAL_CONFIGS.items():
                 union_total += union
 
         mIoU, IoU_per_class = iou_calculation(inter_total, union_total)
-        IoU_per_class = IoU_per_class.tolist()
-        IoU_per_class = [round(num, 3) for num in IoU_per_class]
+        # JSON 저장을 위해 Numpy 타입을 Python float으로 변환
+        IoU_per_class = [round(float(num), 3) for num in IoU_per_class.tolist()]
+        mIoU = float(mIoU)
 
         # (2) Efficiency 측정
         dummy_input = torch.randn(*ds_info["dummy_res"]).to(device)
@@ -200,19 +237,48 @@ for ds_name, ds_info in EVAL_CONFIGS.items():
         total_params = sum(p.numel() for p in model.parameters())
         avg_lat, fps = measure_latency(model, dummy_input)
 
-        # (3) 결과 출력
-        print("-" * 50)
-        print(f"[{ds_name} | {cfg['name']}] RESULTS")
-        print("-" * 50)
-        print(f"mIoU: {mIoU:.4f} | FPS: {fps:.2f} ({avg_lat:.2f} ms)")
-        print(
-            f"Params: {format_numbers(total_params)} | FLOPs: {format_numbers(total_flops)}"
+        # 형 변환 (JSON 호환성)
+        fps = float(fps)
+        avg_lat = float(avg_lat)
+        total_flops = int(total_flops)
+        total_params = int(total_params)
+
+        # (3) 결과 텍스트 생성
+        result_str = (
+            f"[{ds_name} | {cfg['name']}] RESULTS\n"
+            f"-" * 50 + "\n"
+            f"mIoU    : {mIoU:.4f}\n"
+            f"FPS     : {fps:.2f} ({avg_lat:.2f} ms)\n"
+            f"Params  : {format_numbers(total_params)}\n"
+            f"FLOPs   : {format_numbers(total_flops)}\n"
+            f"Per-Class IoU: {IoU_per_class}\n"
+            f"-" * 50
         )
-        print(f"Per-Class IoU:\n{IoU_per_class}")
+
+        # 콘솔 출력
         print("-" * 50)
+        print(result_str)
+
+        # 로그 버퍼에 추가
+        log_buffer.append(result_str)
+
+        # (4) 결과 딕셔너리에 저장 (Raw Data for JSON)
+        full_results[ds_name][cfg["name"]] = {
+            "mIoU": mIoU,
+            "FPS": fps,
+            "Latency_ms": avg_lat,
+            "Params": total_params,
+            "Params_str": format_numbers(total_params),
+            "FLOPs": total_flops,
+            "FLOPs_str": format_numbers(total_flops),
+            "Per_Class_IoU": IoU_per_class,
+        }
+
+        # (5) 중간 저장 (실행 중 멈춰도 데이터 보존)
+        save_results(full_results, log_buffer)
 
         # 메모리 정리
         del model
         torch.cuda.empty_cache()
 
-print("\nAll datasets and models have been evaluated.")
+print(f"\nEvaluation Finished. Results saved to:\n1. {JSON_PATH}\n2. {TXT_PATH}")
